@@ -1,4 +1,3 @@
-/** Fetch live exchange rate via ExchangeRate-API (free tier, no key needed) */
 export async function fetchRate(base, quote) {
   try {
     const r = await fetch(`https://api.exchangerate-api.com/v4/latest/${base}`);
@@ -10,16 +9,9 @@ export async function fetchRate(base, quote) {
   }
 }
 
-/** Call Claude Sonnet for market analysis */
-export async function callClaude(messages) {
+export async function callClaudeStream(messages, onChunk) {
   const apiKey = import.meta.env.VITE_ANTHROPIC_KEY;
   if (!apiKey) throw new Error('No API key found');
-
-  const body = {
-    model: 'claude-sonnet-4-6',
-    max_tokens: 1024,
-    messages: messages,
-  };
 
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -29,7 +21,12 @@ export async function callClaude(messages) {
       'anthropic-version': '2023-06-01',
       'anthropic-dangerous-direct-browser-access': 'true',
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1024,
+      stream: true,
+      messages,
+    }),
   });
 
   if (!resp.ok) {
@@ -38,11 +35,52 @@ export async function callClaude(messages) {
     throw new Error(err?.error?.message ?? 'Claude API error');
   }
 
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let full = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const raw = decoder.decode(value, { stream: true });
+    for (const line of raw.split('\n')) {
+      if (!line.startsWith('data: ')) continue;
+      const json = line.slice(6).trim();
+      if (!json || json === '[DONE]') continue;
+      try {
+        const evt = JSON.parse(json);
+        if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') {
+          full += evt.delta.text;
+          onChunk(full);
+        }
+      } catch { }
+    }
+  }
+  return full;
+}
+
+export async function callClaude(messages) {
+  const apiKey = import.meta.env.VITE_ANTHROPIC_KEY;
+  if (!apiKey) throw new Error('No API key found');
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1024, messages }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    console.error('Claude error:', err);
+    throw new Error(err?.error?.message ?? 'Claude API error');
+  }
   const data = await resp.json();
   return data.content?.[0]?.text ?? 'Analysis unavailable.';
 }
 
-/** Build the auto-analysis prompt */
 export function buildAnalysisPrompt(cfg, price, rsiV, macdD, trendD, stochV, prob) {
   return `You are an expert FX analyst. Give a sharp, 3-sentence analysis for ${cfg.full} (${cfg.label}).
 
@@ -58,7 +96,6 @@ Live data:
 State the directional bias, the key signal driving it, and a brief near-term outlook. Plain text only, no markdown, no bullet points.`;
 }
 
-/** Build a follow-up question prompt */
 export function buildQuestionPrompt(cfg, price, question) {
   return `For ${cfg.label} currently at ${price.toFixed(cfg.dec)}: ${question} Be concise (2-3 sentences), professional. Plain text only.`;
 }
