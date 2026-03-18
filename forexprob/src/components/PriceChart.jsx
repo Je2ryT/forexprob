@@ -283,7 +283,6 @@ export default function PriceChart({ history, pairKey, tf }) {
         style={{ width: '100%', height: '100%', display: 'block' }}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
-        onWheel={handleWheel}
       />
 
       {/* Zoom buttons */}
