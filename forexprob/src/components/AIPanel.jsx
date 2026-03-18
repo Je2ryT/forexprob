@@ -8,6 +8,19 @@ const QUICK_QUESTIONS = [
   { label: 'Full Plan ↗', q: 'Give me a full analysis: trend, probability breakdown, entry/exit plan with position sizing.', accent: true },
 ];
 
+function StreamingText({ text }) {
+  return (
+    <span>
+      {text}
+      <span style={{
+        display: 'inline-block', width: 2, height: '1em',
+        background: 'var(--acc)', marginLeft: 2, verticalAlign: 'text-bottom',
+        animation: 'priceblink 0.7s infinite',
+      }} />
+    </span>
+  );
+}
+
 export default function AIPanel({ currentPair, aiMessages, onAsk }) {
   const [input, setInput] = useState('');
   const bottomRef = useRef(null);
@@ -43,10 +56,23 @@ export default function AIPanel({ currentPair, aiMessages, onAsk }) {
           if (msg.type === 'loading') {
             return (
               <div key={i} className="ai-msg-bubble loading fadein">
-                <div className="dots">
-                  <span /><span /><span />
-                </div>
+                <div className="dots"><span /><span /><span /></div>
                 <span style={{ fontSize: 11 }}>Analyzing...</span>
+              </div>
+            );
+          }
+          if (msg.type === 'streaming') {
+            const bias = msg.prob?.bull > 55 ? 'up' : msg.prob?.bear > 55 ? 'dn' : 'neu';
+            const biasLabel = bias === 'up' ? 'Bullish' : bias === 'dn' ? 'Bearish' : 'Neutral';
+            return (
+              <div key={i} className="ai-msg-bubble fadein">
+                {msg.prob && (
+                  <div style={{ marginBottom: 6 }}>
+                    <span className={`ai-tag tag-${bias}`}>{biasLabel}</span>
+                    <span className="ai-tag tag-acc">{cfg?.label}</span>
+                  </div>
+                )}
+                <StreamingText text={msg.text || ''} />
               </div>
             );
           }
@@ -77,9 +103,7 @@ export default function AIPanel({ currentPair, aiMessages, onAsk }) {
           }
           if (msg.type === 'answer') {
             return (
-              <div key={i} className="ai-msg-bubble fadein">
-                {msg.text}
-              </div>
+              <div key={i} className="ai-msg-bubble fadein">{msg.text}</div>
             );
           }
           if (msg.type === 'error') {
@@ -96,11 +120,7 @@ export default function AIPanel({ currentPair, aiMessages, onAsk }) {
 
       <div className="ai-quick-btns">
         {QUICK_QUESTIONS.map(({ label, q, accent }) => (
-          <button
-            key={label}
-            className={`ai-q-btn${accent ? ' accent' : ''}`}
-            onClick={() => onAsk(q)}
-          >
+          <button key={label} className={`ai-q-btn${accent ? ' accent' : ''}`} onClick={() => onAsk(q)}>
             {label}
           </button>
         ))}
