@@ -1,14 +1,18 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Chart } from 'chart.js/auto';
 import { genOHLC, emaSeries } from '../utils/indicators.js';
+import OHLCPopup from './OHLCPopup.jsx';
 
 export default function PriceChart({ history, pairKey, tf }) {
   const canvasRef = useRef(null);
   const chartRef  = useRef(null);
+  const ohlcRef   = useRef([]);
+  const [popup, setPopup] = useState(null);
 
   useEffect(() => {
     if (!history || history.length < 5) return;
     const ohlc   = genOHLC(history);
+    ohlcRef.current = ohlc;
     const closes = ohlc.map(b => b.c);
     const isJPY  = pairKey?.includes('JPY');
     const dec    = isJPY ? 3 : 5;
@@ -16,7 +20,7 @@ export default function PriceChart({ history, pairKey, tf }) {
     const ema20 = emaSeries(closes, 20);
     const ema50 = emaSeries(closes, 50);
 
-    const barColors   = ohlc.map(b => b.c >= b.o ? 'rgba(34,199,122,0.30)' : 'rgba(245,71,58,0.30)');
+    const barColors    = ohlc.map(b => b.c >= b.o ? 'rgba(34,199,122,0.30)' : 'rgba(245,71,58,0.30)');
     const borderColors = ohlc.map(b => b.c >= b.o ? '#22c77a' : '#f5473a');
 
     if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; }
@@ -55,26 +59,16 @@ export default function PriceChart({ history, pairKey, tf }) {
         responsive: true,
         maintainAspectRatio: false,
         animation: { duration: 350 },
+        onClick: (evt, elements) => {
+          if (!elements.length) { setPopup(null); return; }
+          const idx = elements[0].index;
+          const bar = ohlcRef.current[idx];
+          if (!bar) return;
+          setPopup({ bar: { ...bar, dec }, x: evt.native.clientX, y: evt.native.clientY });
+        },
         plugins: {
           legend: { display: false },
-          tooltip: {
-            backgroundColor: '#14161d',
-            borderColor: 'rgba(255,255,255,0.09)',
-            borderWidth: 1,
-            titleColor: '#8a8880',
-            bodyColor: '#e8e6e0',
-            callbacks: {
-              title: () => [],
-              label: (ctx) => {
-                if (ctx.datasetIndex !== 0) return null;
-                const b = ohlc[ctx.dataIndex];
-                return [
-                  `O: ${b.o.toFixed(dec)}  H: ${b.h.toFixed(dec)}`,
-                  `L: ${b.l.toFixed(dec)}  C: ${b.c.toFixed(dec)}`,
-                ];
-              },
-            },
-          },
+          tooltip: { enabled: false },
         },
         scales: {
           x: { display: false, grid: { display: false } },
@@ -95,8 +89,21 @@ export default function PriceChart({ history, pairKey, tf }) {
   }, [history, pairKey, tf]);
 
   return (
-    <div className="chart-area">
+    <div className="chart-area" style={{ cursor: 'crosshair' }}>
       <canvas ref={canvasRef} />
+      {popup && (
+        <OHLCPopup
+          bar={popup.bar}
+          position={{ x: popup.x, y: popup.y }}
+          onClose={() => setPopup(null)}
+        />
+      )}
+      <div style={{
+        position: 'absolute', bottom: 8, left: 12,
+        fontSize: 10, color: 'var(--t3)', fontFamily: 'var(--mono)', pointerEvents: 'none',
+      }}>
+        click any bar for OHLC details
+      </div>
     </div>
   );
 }
