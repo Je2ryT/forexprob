@@ -1,118 +1,134 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
-import { PAIRS } from './utils/config.js';
-import { useForex } from './hooks/useForex.js';
-import TopNav from './components/TopNav.jsx';
-import TickerTape from './components/TickerTape.jsx';
-import LeftSidebar from './components/LeftSidebar.jsx';
-import CenterPanel from './components/CenterPanel.jsx';
-import RightSidebar from './components/RightSidebar.jsx';
-import './styles/main.css';
+const TWELVE_KEY = import.meta.env.VITE_TWELVE_KEY;
 
-export default function App() {
-  const {
-    currentPair, tf,
-    pairData, analysis, aiMessages,
-    loadPair, selectPair, changeTf, askAI, tickPrice,
-  } = useForex();
+export async function fetchRate(base, quote) {
+  if (TWELVE_KEY) {
+    try {
+      const symbol = `${base}/${quote}`;
+      const r = await fetch(`https://api.twelvedata.com/price?symbol=${symbol}&apikey=${TWELVE_KEY}`);
+      if (r.ok) {
+        const d = await r.json();
+        if (d.price) return parseFloat(d.price);
+      }
+    } catch { }
+  }
+  try {
+    const r = await fetch(`https://api.exchangerate-api.com/v4/latest/${base}`);
+    if (!r.ok) throw new Error('rate fail');
+    const d = await r.json();
+    return d.rates[quote] ?? null;
+  } catch {
+    return null;
+  }
+}
 
-  const [isDark, setIsDark] = useState(true);
-  const tickRef = useRef(null);
+export async function fetchCandles(base, quote, interval = '1min', outputsize = 80) {
+  if (!TWELVE_KEY) return null;
+  try {
+    const symbol = `${base}/${quote}`;
+    const r = await fetch(
+      `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval}&outputsize=${outputsize}&apikey=${TWELVE_KEY}`
+    );
+    if (!r.ok) return null;
+    const d = await r.json();
+    if (!d.values || d.status === 'error') return null;
+    return d.values.reverse().map(v => ({
+      o: parseFloat(v.open),
+      h: parseFloat(v.high),
+      l: parseFloat(v.low),
+      c: parseFloat(v.close),
+    }));
+  } catch {
+    return null;
+  }
+}
 
-  useEffect(() => {
-    const root = document.documentElement;
-    if (isDark) {
-      root.style.setProperty('--bg',    '#0a0b0e');
-      root.style.setProperty('--bg2',   '#0f1117');
-      root.style.setProperty('--bg3',   '#14161d');
-      root.style.setProperty('--bg4',   '#1a1d26');
-      root.style.setProperty('--bg5',   '#1f2230');
-      root.style.setProperty('--t1',    '#e8e6e0');
-      root.style.setProperty('--t2',    '#8a8880');
-      root.style.setProperty('--t3',    '#4a4845');
-      root.style.setProperty('--t4',    '#2a2825');
-      root.style.setProperty('--border',  'rgba(255,255,255,0.06)');
-      root.style.setProperty('--border2', 'rgba(255,255,255,0.10)');
-      root.style.setProperty('--border3', 'rgba(255,255,255,0.16)');
-    } else {
-      root.style.setProperty('--bg',    '#f4f3ef');
-      root.style.setProperty('--bg2',   '#eceae4');
-      root.style.setProperty('--bg3',   '#e4e2db');
-      root.style.setProperty('--bg4',   '#d8d6ce');
-      root.style.setProperty('--bg5',   '#cccac2');
-      root.style.setProperty('--t1',    '#1a1816');
-      root.style.setProperty('--t2',    '#4a4845');
-      root.style.setProperty('--t3',    '#8a8880');
-      root.style.setProperty('--t4',    '#b0aea8');
-      root.style.setProperty('--border',  'rgba(0,0,0,0.08)');
-      root.style.setProperty('--border2', 'rgba(0,0,0,0.12)');
-      root.style.setProperty('--border3', 'rgba(0,0,0,0.20)');
+export async function callClaudeStream(messages, onChunk) {
+  const apiKey = import.meta.env.VITE_ANTHROPIC_KEY;
+  if (!apiKey) throw new Error('No API key found');
+
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1024,
+      stream: true,
+      messages,
+    }),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.json();
+    console.error('Claude error:', err);
+    throw new Error(err?.error?.message ?? 'Claude API error');
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let full = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const raw = decoder.decode(value, { stream: true });
+    for (const line of raw.split('\n')) {
+      if (!line.startsWith('data: ')) continue;
+      const json = line.slice(6).trim();
+      if (!json || json === '[DONE]') continue;
+      try {
+        const evt = JSON.parse(json);
+        if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') {
+          full += evt.delta.text;
+          onChunk(full);
+        }
+      } catch { }
     }
-  }, [isDark]);
+  }
+  return full;
+}
 
-  useEffect(() => {
-    loadPair(currentPair);
-    const others = Object.keys(PAIRS).filter(k => k !== currentPair);
-    others.forEach((k, i) => {
-      setTimeout(() => loadPair(k), 300 + i * 200);
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+export async function callClaude(messages) {
+  const apiKey = import.meta.env.VITE_ANTHROPIC_KEY;
+  if (!apiKey) throw new Error('No API key found');
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1024, messages }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    console.error('Claude error:', err);
+    throw new Error(err?.error?.message ?? 'Claude API error');
+  }
+  const data = await resp.json();
+  return data.content?.[0]?.text ?? 'Analysis unavailable.';
+}
 
-  useEffect(() => {
-    tickRef.current = setInterval(() => {
-      Object.keys(PAIRS).forEach(k => tickPrice(k));
-    }, 8000);
-    return () => clearInterval(tickRef.current);
-  }, [tickPrice]);
+export function buildAnalysisPrompt(cfg, price, rsiV, macdD, trendD, stochV, prob) {
+  return `You are an expert FX analyst. Give a sharp, 3-sentence analysis for ${cfg.full} (${cfg.label}).
 
-  useEffect(() => {
-    const MAP = {
-      e: 'EURUSD', g: 'GBPUSD', j: 'USDJPY', a: 'AUDUSD',
-      c: 'USDCAD', f: 'USDCHF', n: 'NZDUSD', r: 'EURJPY',
-    };
-    const handler = (e) => {
-      if (e.target.tagName === 'INPUT') return;
-      const key = e.key.toLowerCase();
-      if (MAP[key]) selectPair(MAP[key]);
-      if (key === 'd') setIsDark(v => !v);
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [selectPair]);
+Live data:
+- Price: ${price.toFixed(cfg.dec)}
+- RSI (14): ${rsiV.toFixed(1)}
+- MACD: ${macdD.sig}
+- Trend: ${trendD.label}
+- Stochastic %K: ${stochV.toFixed(1)}
+- Bull Probability: ${prob.bull}%
+- Bear Probability: ${prob.bear}%
 
-  return (
-    <div className="terminal">
-      <TopNav
-        currentPair={currentPair}
-        pairData={pairData}
-        onSelect={selectPair}
-        onRefresh={() => loadPair(currentPair)}
-      />
-      <TickerTape pairData={pairData} />
-      <div className="grid-main">
-        <LeftSidebar
-          currentPair={currentPair}
-          pairData={pairData}
-          analysis={analysis}
-          onSelect={selectPair}
-        />
-        <CenterPanel
-          currentPair={currentPair}
-          pairData={pairData}
-          analysis={analysis}
-          tf={tf}
-          onTfChange={changeTf}
-          isDark={isDark}
-          onToggleTheme={() => setIsDark(v => !v)}
-        />
-        <RightSidebar
-          currentPair={currentPair}
-          pairData={pairData}
-          analysis={analysis}
-          aiMessages={aiMessages}
-          onAsk={askAI}
-        />
-      </div>
-    </div>
-  );
+State the directional bias, the key signal driving it, and a brief near-term outlook. Plain text only, no markdown, no bullet points.`;
+}
+
+export function buildQuestionPrompt(cfg, price, question) {
+  return `For ${cfg.label} currently at ${price.toFixed(cfg.dec)}: ${question} Be concise (2-3 sentences), professional. Plain text only.`;
 }
