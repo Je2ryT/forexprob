@@ -13,23 +13,31 @@ export async function fetchRate(base, quote) {
 /** Call Claude Sonnet for market analysis */
 export async function callClaude(messages) {
   const apiKey = import.meta.env.VITE_ANTHROPIC_KEY;
-  if (!apiKey) throw new Error('No API key');
+  if (!apiKey) throw new Error('No API key found');
+
+  const body = {
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1024,
+    messages: messages,
+  };
 
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'content-type': 'application/json',
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
       'anthropic-dangerous-direct-browser-access': 'true',
     },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1000,
-      messages,
-    }),
+    body: JSON.stringify(body),
   });
-  if (!resp.ok) throw new Error('Claude API error');
+
+  if (!resp.ok) {
+    const err = await resp.json();
+    console.error('Claude error:', err);
+    throw new Error(err?.error?.message ?? 'Claude API error');
+  }
+
   const data = await resp.json();
   return data.content?.[0]?.text ?? 'Analysis unavailable.';
 }
@@ -52,5 +60,5 @@ State the directional bias, the key signal driving it, and a brief near-term out
 
 /** Build a follow-up question prompt */
 export function buildQuestionPrompt(cfg, price, question) {
-  return `For ${cfg.label} currently at ${price.toFixed(cfg.dec)}: ${question} Be concise (2–3 sentences), professional. Plain text only.`;
+  return `For ${cfg.label} currently at ${price.toFixed(cfg.dec)}: ${question} Be concise (2-3 sentences), professional. Plain text only.`;
 }
