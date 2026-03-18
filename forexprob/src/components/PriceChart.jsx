@@ -275,8 +275,26 @@ export default function PriceChart({ history, pairKey, tf }) {
   const zoomIn    = () => { const { start, end } = zoomRef.current; const mid = (start+end)/2, span=(end-start)*0.7; zoomRef.current={start:Math.max(0,mid-span/2),end:Math.min(1,mid+span/2)}; draw(null); };
   const zoomOut   = () => { const { start, end } = zoomRef.current; const mid = (start+end)/2, span=Math.min(1,(end-start)*1.4); zoomRef.current={start:Math.max(0,mid-span/2),end:Math.min(1,mid+span/2)}; draw(null); };
   const zoomReset = () => { zoomRef.current = { start: 0, end: 1 }; draw(null); };
-
-  return (
+// Attach wheel listener as non-passive so preventDefault works
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const handler = (e) => {
+      e.preventDefault();
+      const { start, end } = zoomRef.current;
+      const span = end - start;
+      const delta = e.deltaY > 0 ? 0.05 : -0.05;
+      const newSpan = Math.max(0.1, Math.min(1, span + delta));
+      const mid = (start + end) / 2;
+      zoomRef.current = {
+        start: Math.max(0, mid - newSpan / 2),
+        end:   Math.min(1, mid + newSpan / 2),
+      };
+      draw(null);
+    };
+    canvas.addEventListener('wheel', handler, { passive: false });
+    return () => canvas.removeEventListener('wheel', handler);
+  }, [draw]);  return (
     <div className="chart-area" style={{ position: 'relative', cursor: 'crosshair' }}>
       <canvas
         ref={canvasRef}
