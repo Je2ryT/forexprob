@@ -12,14 +12,18 @@ export async function fetchRate(base, quote) {
 
 /** Call Claude Sonnet for market analysis */
 export async function callClaude(messages) {
+  const apiKey = import.meta.env.VITE_ANTHROPIC_KEY;
+  if (!apiKey) throw new Error('No API key');
+
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'x-api-key': import.meta.env.VITE_ANTHROPIC_KEY,
-    'anthropic-version': '2023-06-01',
-    'anthropic-dangerous-direct-browser-access': 'true',
-  },    body: JSON.stringify({
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 1000,
       messages,
