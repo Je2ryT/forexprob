@@ -5,40 +5,27 @@ export default function TickerTape({ pairData }) {
   const all = [...items, ...items];
 
   return (
-    <div style={{
-      background: 'var(--bg2)',
-      borderBottom: '1px solid var(--border)',
-      overflow: 'hidden',
-      height: 28,
-      display: 'flex',
-      alignItems: 'center',
-      flexShrink: 0,
-    }}>
-      <div style={{
-        display: 'flex',
-        gap: 0,
-        animation: 'tickerScroll 40s linear infinite',
-        whiteSpace: 'nowrap',
-      }}>
+    <div className="ticker-tape-wrap">
+      <div className="ticker-track">
         {all.map(([key, cfg], i) => {
           const pd = pairData[key];
           const isUp = pd?.isUp ?? true;
           const price = pd ? pd.price.toFixed(cfg.dec) : '—';
           const chg = pd ? `${pd.isUp ? '+' : ''}${pd.change.toFixed(cfg.dec)}` : '';
           return (
-            <span key={i} style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 6,
-              padding: '0 20px',
-              borderRight: '1px solid var(--border)',
-              fontFamily: 'var(--mono)',
-              fontSize: 11,
-            }}>
-              <span style={{ color: 'var(--t2)', fontWeight: 500 }}>{cfg.label}</span>
-              <span style={{ color: isUp ? 'var(--up)' : 'var(--dn)', fontWeight: 700 }}>{price}</span>
+            <span key={i} className="tick-item">
+              <span className="tick-pair">{cfg.label}</span>
+              <span style={{
+                fontFamily: 'var(--mono)', fontSize: 10, fontWeight: 500,
+                color: isUp ? 'var(--up)' : 'var(--dn)',
+              }}>
+                {price}
+              </span>
               {pd && (
-                <span style={{ color: isUp ? 'var(--up)' : 'var(--dn)', fontSize: 10 }}>
+                <span style={{
+                  fontFamily: 'var(--mono)', fontSize: 9,
+                  color: isUp ? 'var(--up)' : 'var(--dn)',
+                }}>
                   {isUp ? '▲' : '▼'} {chg}
                 </span>
               )}
@@ -46,12 +33,6 @@ export default function TickerTape({ pairData }) {
           );
         })}
       </div>
-      <style>{`
-        @keyframes tickerScroll {
-          0%   { transform: translateX(0); }
-          100% { transform: translateX(-50%); }
-        }
-      `}</style>
     </div>
   );
 }
