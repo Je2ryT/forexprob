@@ -1,62 +1,52 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { genOHLC } from '../utils/indicators.js';
 
-function computeSupportResistance(ohlc, levels = 3) {
-  if (ohlc.length < 10) return { supports: [], resistances: [] };
-  const highs = ohlc.map(b => b.h);
-  const lows  = ohlc.map(b => b.l);
+function getSR(visible) {
+  const highs = visible.map(b => b.h), lows = visible.map(b => b.l);
   const range = Math.max(...highs) - Math.min(...lows);
-  const bucket = range / 12;
-
-  const hBuckets = {}, lBuckets = {};
-  highs.forEach(h => { const k = Math.round(h / bucket); hBuckets[k] = (hBuckets[k] || 0) + 1; });
-  lows.forEach(l  => { const k = Math.round(l / bucket); lBuckets[k] = (lBuckets[k] || 0) + 1; });
-
-  const topH = Object.entries(hBuckets).sort((a,b) => b[1]-a[1]).slice(0, levels).map(([k]) => +k * bucket);
-  const topL = Object.entries(lBuckets).sort((a,b) => b[1]-a[1]).slice(0, levels).map(([k]) => +k * bucket);
-
-  const last = ohlc[ohlc.length - 1].c;
-  return {
-    resistances: topH.filter(v => v > last).slice(0, levels),
-    supports:    topL.filter(v => v < last).slice(0, levels),
-  };
+  const bucket = range / 10;
+  const hb = {}, lb = {};
+  highs.forEach(h => { const k = Math.round(h / bucket); hb[k] = (hb[k] || 0) + 1; });
+  lows.forEach(l  => { const k = Math.round(l / bucket); lb[k] = (lb[k] || 0) + 1; });
+  const last = visible[visible.length - 1].c;
+  const res = Object.entries(hb).sort((a,b) => b[1]-a[1]).slice(0,2).map(([k]) => +k * bucket).filter(v => v > last);
+  const sup = Object.entries(lb).sort((a,b) => b[1]-a[1]).slice(0,2).map(([k]) => +k * bucket).filter(v => v < last);
+  return { res, sup };
 }
 
-function computeSignals(ohlc) {
-  const signals = [];
-  for (let i = 2; i < ohlc.length; i++) {
-    const prev = ohlc[i-1], cur = ohlc[i];
-    // Bullish engulfing
-    if (prev.c < prev.o && cur.c > cur.o && cur.o < prev.c && cur.c > prev.o) {
-      signals.push({ idx: i, type: 'buy', price: cur.l });
-    }
-    // Bearish engulfing
-    if (prev.c > prev.o && cur.c < cur.o && cur.o > prev.c && cur.c < prev.o) {
-      signals.push({ idx: i, type: 'sell', price: cur.h });
-    }
-    // Hammer (bullish)
-    const bodySize = Math.abs(cur.c - cur.o);
-    const lowerWick = Math.min(cur.c, cur.o) - cur.l;
-    if (lowerWick > bodySize * 2 && cur.c > cur.o) {
-      signals.push({ idx: i, type: 'buy', price: cur.l });
-    }
+function getSignals(visible) {
+  const sigs = [];
+  for (let i = 1; i < visible.length; i++) {
+    const p = visible[i-1], c = visible[i];
+    if (p.c < p.o && c.c > c.o && c.o < p.c && c.c > p.o) sigs.push({ i, type: 'buy' });
+    if (p.c > p.o && c.c < c.o && c.o > p.c && c.c < p.o) sigs.push({ i, type: 'sell' });
+    const body = Math.abs(c.c - c.o), wick = Math.min(c.c, c.o) - c.l;
+    if (wick > body * 2.2 && c.c > c.o) sigs.push({ i, type: 'buy' });
   }
-  return signals.filter((s, i, arr) =>
-    !arr.slice(0, i).some(p => p.idx === s.idx && p.type === s.type)
-  );
+  return sigs.filter((s, idx, arr) => !arr.slice(0, idx).some(x => x.i === s.i && x.type === s.type));
+}
+
+function emaSeries(closes, period) {
+  const k = 2 / (period + 1);
+  let e = closes[0];
+  return closes.map((v, i) => {
+    if (i === 0) return null;
+    e = v * k + e * (1 - k);
+    return i < period - 1 ? null : e;
+  });
 }
 
 export default function PriceChart({ history, pairKey, tf }) {
-  const canvasRef  = useRef(null);
-  const ohlcRef    = useRef([]);
-  const zoomRef    = useRef({ start: 0, end: 1 });
+  const canvasRef = useRef(null);
+  const ohlcRef   = useRef([]);
+  const zoomRef   = useRef({ start: 0, end: 1 });
+  const crossRef  = useRef(null);
   const [tooltip, setTooltip] = useState(null);
-  const [crosshair, setCrosshair] = useState(null);
 
   const isJPY = pairKey?.includes('JPY');
   const dec   = isJPY ? 3 : 5;
 
-  const draw = useCallback((cross) => {
+  const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ohlc = ohlcRef.current;
@@ -66,236 +56,231 @@ export default function PriceChart({ history, pairKey, tf }) {
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, W, H);
 
-    const PAD_L = 8, PAD_R = 72, PAD_T = 20, PAD_B = 32;
-    const chartW = W - PAD_L - PAD_R;
-    const chartH = H - PAD_T - PAD_B;
-
+    const PL = 8, PR = 74, PT = 16, PB = 28;
+    const CW = W - PL - PR, CH = H - PT - PB;
     const { start, end } = zoomRef.current;
-    const startIdx = Math.floor(start * ohlc.length);
-    const endIdx   = Math.ceil(end * ohlc.length);
-    const visible  = ohlc.slice(startIdx, endIdx);
-    if (!visible.length) return;
+    const si = Math.floor(start * ohlc.length);
+    const ei = Math.ceil(end * ohlc.length);
+    const vis = ohlc.slice(si, ei);
+    if (!vis.length) return;
 
-    const minL = Math.min(...visible.map(b => b.l));
-    const maxH = Math.max(...visible.map(b => b.h));
-    const priceRange = maxH - minL || 0.001;
-    const pad = priceRange * 0.08;
+    const minL = Math.min(...vis.map(b => b.l));
+    const maxH = Math.max(...vis.map(b => b.h));
+    const rng = maxH - minL || 0.001;
+    const pad = rng * 0.1;
     const lo = minL - pad, hi = maxH + pad;
 
-    const toX = (i) => PAD_L + ((i - startIdx) / Math.max(endIdx - startIdx - 1, 1)) * chartW;
-    const toY = (p) => PAD_T + (1 - (p - lo) / (hi - lo)) * chartH;
+    const toX = i => PL + ((i - si) / Math.max(ei - si - 1, 1)) * CW;
+    const toY = p => PT + (1 - (p - lo) / (hi - lo)) * CH;
 
-    // Grid
-    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-    ctx.lineWidth = 0.5;
-    for (let i = 0; i <= 4; i++) {
-      const y = PAD_T + (i / 4) * chartH;
-      ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - PAD_R, y); ctx.stroke();
-      const price = hi - (i / 4) * (hi - lo);
-      ctx.fillStyle = '#4a4845';
-      ctx.font = '10px JetBrains Mono';
+    // Background grid
+    for (let i = 0; i <= 5; i++) {
+      const y = PT + (i / 5) * CH;
+      ctx.strokeStyle = 'rgba(56,189,248,0.04)';
+      ctx.lineWidth = 0.5;
+      ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(W - PR, y); ctx.stroke();
+      const price = hi - (i / 5) * (hi - lo);
+      ctx.fillStyle = '#2d4460';
+      ctx.font = '9px JetBrains Mono';
       ctx.textAlign = 'left';
-      ctx.fillText(price.toFixed(dec), W - PAD_R + 6, y + 4);
+      ctx.fillText(price.toFixed(dec), W - PR + 6, y + 3);
     }
 
-    // Support & Resistance
-    const { supports, resistances } = computeSupportResistance(visible);
-    supports.forEach(s => {
-      const y = toY(s);
-      ctx.strokeStyle = 'rgba(34,199,122,0.5)';
-      ctx.lineWidth = 0.8;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - PAD_R, y); ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.fillStyle = 'rgba(34,199,122,0.8)';
-      ctx.font = '9px JetBrains Mono';
-      ctx.textAlign = 'left';
-      ctx.fillText('S ' + s.toFixed(dec), W - PAD_R + 6, y - 2);
+    // Vertical grid
+    const step = Math.max(1, Math.floor(vis.length / 8));
+    vis.forEach((_, i) => {
+      if (i % step !== 0) return;
+      const x = toX(si + i);
+      ctx.strokeStyle = 'rgba(56,189,248,0.03)';
+      ctx.lineWidth = 0.5;
+      ctx.beginPath(); ctx.moveTo(x, PT); ctx.lineTo(x, PT + CH); ctx.stroke();
     });
-    resistances.forEach(r => {
-      const y = toY(r);
-      ctx.strokeStyle = 'rgba(245,71,58,0.5)';
-      ctx.lineWidth = 0.8;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - PAD_R, y); ctx.stroke();
+
+    // Support & Resistance
+    const { res, sup } = getSR(vis);
+    [...sup.map(s => ({ v: s, type: 'sup' })), ...res.map(r => ({ v: r, type: 'res' }))].forEach(({ v, type }) => {
+      const y = toY(v);
+      if (y < PT || y > PT + CH) return;
+      const color  = type === 'sup' ? 'rgba(0,217,126,0.4)' : 'rgba(255,77,77,0.4)';
+      const lcolor = type === 'sup' ? 'rgba(0,217,126,0.8)' : 'rgba(255,77,77,0.8)';
+      ctx.strokeStyle = color; ctx.lineWidth = 0.8;
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(W - PR, y); ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle = 'rgba(245,71,58,0.8)';
-      ctx.font = '9px JetBrains Mono';
-      ctx.textAlign = 'left';
-      ctx.fillText('R ' + r.toFixed(dec), W - PAD_R + 6, y - 2);
+      ctx.fillStyle = lcolor;
+      ctx.font = '8px JetBrains Mono'; ctx.textAlign = 'left';
+      ctx.fillText((type === 'sup' ? 'S ' : 'R ') + v.toFixed(dec), W - PR + 6, y - 2);
+    });
+
+    // EMA lines
+    const closes = vis.map(b => b.c);
+    const e20 = emaSeries(closes, 20);
+    const e50 = emaSeries(closes, 50);
+    [[e20, '#f0b429'], [e50, '#38bdf8']].forEach(([ser, col]) => {
+      ctx.strokeStyle = col; ctx.lineWidth = 1.2; ctx.setLineDash([]);
+      let started = false;
+      ctx.beginPath();
+      ser.forEach((v, i) => {
+        if (v === null) return;
+        const x = toX(si + i), y = toY(v);
+        if (!started) { ctx.moveTo(x, y); started = true; }
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
     });
 
     // Candles
-    const candleW = Math.max(1, (chartW / visible.length) * 0.6);
-    visible.forEach((b, i) => {
-      const x     = toX(startIdx + i);
-      const isUp  = b.c >= b.o;
-      const color = isUp ? '#22c77a' : '#f5473a';
-      const openY = toY(b.o), closeY = toY(b.c);
-      const highY = toY(b.h), lowY   = toY(b.l);
+    const cw = Math.max(1.5, (CW / vis.length) * 0.65);
+    vis.forEach((b, i) => {
+      const x = toX(si + i);
+      const isUp = b.c >= b.o;
+      const col = isUp ? '#00d97e' : '#ff4d4d';
+      const oy = toY(b.o), cy = toY(b.c), hy = toY(b.h), ly = toY(b.l);
 
-      // Wick
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(x, highY);
-      ctx.lineTo(x, Math.min(openY, closeY));
-      ctx.moveTo(x, Math.max(openY, closeY));
-      ctx.lineTo(x, lowY);
-      ctx.stroke();
+      // Wick with glow
+      ctx.shadowColor = col; ctx.shadowBlur = 2;
+      ctx.strokeStyle = col; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x, hy); ctx.lineTo(x, Math.min(oy, cy)); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, Math.max(oy, cy)); ctx.lineTo(x, ly); ctx.stroke();
+      ctx.shadowBlur = 0;
 
       // Body
-      const bodyH = Math.max(1, Math.abs(closeY - openY));
-      ctx.fillStyle = isUp ? 'rgba(34,199,122,0.75)' : 'rgba(245,71,58,0.75)';
-      ctx.fillRect(x - candleW / 2, Math.min(openY, closeY), candleW, bodyH);
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 0.8;
-      ctx.strokeRect(x - candleW / 2, Math.min(openY, closeY), candleW, bodyH);
+      const bh = Math.max(1.5, Math.abs(cy - oy));
+      const by = Math.min(oy, cy);
+      ctx.fillStyle = isUp ? 'rgba(0,217,126,0.7)' : 'rgba(255,77,77,0.7)';
+      ctx.fillRect(x - cw / 2, by, cw, bh);
+      ctx.strokeStyle = col; ctx.lineWidth = 0.8;
+      ctx.strokeRect(x - cw / 2, by, cw, bh);
     });
 
     // Buy/sell signals
-    const signals = computeSignals(visible);
-    signals.forEach(sig => {
-      const b = visible[sig.idx - startIdx];
+    getSignals(vis).forEach(sig => {
+      const b = vis[sig.i];
       if (!b) return;
-      const x = toX(startIdx + sig.idx - startIdx);
+      const x = toX(si + sig.i);
       const isBuy = sig.type === 'buy';
-      const y = isBuy ? toY(b.l) + 14 : toY(b.h) - 14;
-      ctx.fillStyle = isBuy ? '#22c77a' : '#f5473a';
-      ctx.font = 'bold 10px JetBrains Mono';
+      const col = isBuy ? '#00d97e' : '#ff4d4d';
+      const y = isBuy ? toY(b.l) + 16 : toY(b.h) - 16;
+      ctx.fillStyle = col;
+      ctx.shadowColor = col; ctx.shadowBlur = 6;
+      ctx.font = 'bold 11px JetBrains Mono';
       ctx.textAlign = 'center';
       ctx.fillText(isBuy ? '▲' : '▼', x, y);
-      ctx.font = '8px JetBrains Mono';
-      ctx.fillText(isBuy ? 'BUY' : 'SELL', x, y + (isBuy ? 10 : -4));
+      ctx.shadowBlur = 0;
+      ctx.font = '7px JetBrains Mono';
+      ctx.fillText(isBuy ? 'BUY' : 'SELL', x, y + (isBuy ? 11 : -5));
     });
 
     // Current price line
-    const lastPrice = ohlc[ohlc.length - 1].c;
-    if (lastPrice >= lo && lastPrice <= hi) {
-      const y = toY(lastPrice);
-      ctx.strokeStyle = 'rgba(232,169,60,0.6)';
-      ctx.lineWidth = 0.8;
-      ctx.setLineDash([3, 3]);
-      ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - PAD_R, y); ctx.stroke();
+    const last = ohlc[ohlc.length - 1].c;
+    if (last >= lo && last <= hi) {
+      const y = toY(last);
+      ctx.strokeStyle = 'rgba(240,180,41,0.5)';
+      ctx.lineWidth = 0.8; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(W - PR, y); ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle = '#e8a93c';
-      ctx.fillRect(W - PAD_R + 2, y - 8, PAD_R - 4, 16);
+      ctx.fillStyle = '#f0b429';
+      ctx.fillRect(W - PR + 2, y - 9, PR - 4, 18);
       ctx.fillStyle = '#000';
       ctx.font = 'bold 9px JetBrains Mono';
       ctx.textAlign = 'center';
-      ctx.fillText(lastPrice.toFixed(dec), W - PAD_R + 2 + (PAD_R - 4) / 2, y + 3);
+      ctx.fillText(last.toFixed(dec), W - PR + 2 + (PR - 4) / 2, y + 3);
     }
 
     // Crosshair
+    const cross = crossRef.current;
     if (cross) {
-      ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-      ctx.lineWidth = 0.5;
-      ctx.setLineDash([3, 3]);
-      ctx.beginPath(); ctx.moveTo(cross.x, PAD_T); ctx.lineTo(cross.x, PAD_T + chartH); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(PAD_L, cross.y); ctx.lineTo(W - PAD_R, cross.y); ctx.stroke();
+      ctx.strokeStyle = 'rgba(56,189,248,0.25)';
+      ctx.lineWidth = 0.5; ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(cross.x, PT); ctx.lineTo(cross.x, PT + CH); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(PL, cross.y); ctx.lineTo(W - PR, cross.y); ctx.stroke();
       ctx.setLineDash([]);
-      const hoverPrice = lo + (1 - (cross.y - PAD_T) / chartH) * (hi - lo);
-      ctx.fillStyle = 'rgba(255,255,255,0.12)';
-      ctx.fillRect(W - PAD_R + 2, cross.y - 8, PAD_R - 4, 16);
-      ctx.fillStyle = '#e8e6e0';
-      ctx.font = '9px JetBrains Mono';
-      ctx.textAlign = 'center';
-      ctx.fillText(hoverPrice.toFixed(dec), W - PAD_R + 2 + (PAD_R - 4) / 2, cross.y + 3);
+      const hp = lo + (1 - (cross.y - PT) / CH) * (hi - lo);
+      ctx.fillStyle = 'rgba(8,12,20,0.92)';
+      ctx.fillRect(W - PR + 2, cross.y - 9, PR - 4, 18);
+      ctx.strokeStyle = 'rgba(56,189,248,0.2)';
+      ctx.strokeRect(W - PR + 2, cross.y - 9, PR - 4, 18);
+      ctx.fillStyle = '#38bdf8';
+      ctx.font = '9px JetBrains Mono'; ctx.textAlign = 'center';
+      ctx.fillText(hp.toFixed(dec), W - PR + 2 + (PR - 4) / 2, cross.y + 3);
     }
   }, [dec]);
 
-  // Resize
+  // Resize observer
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ro = new ResizeObserver(() => {
       canvas.width  = canvas.offsetWidth;
       canvas.height = canvas.offsetHeight;
-      draw(crosshair);
+      draw();
     });
     ro.observe(canvas);
     return () => ro.disconnect();
-  }, [draw, crosshair]);
+  }, [draw]);
 
   // New data
   useEffect(() => {
     if (!history || history.length < 5) return;
     ohlcRef.current = genOHLC(history);
     zoomRef.current = { start: 0, end: 1 };
-    draw(null);
+    draw();
   }, [history, pairKey, tf, draw]);
 
-  const getCanvasPos = (e) => {
+  // Wheel zoom — non-passive
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const handler = e => {
+      e.preventDefault();
+      const { start, end } = zoomRef.current;
+      const span = end - start;
+      const delta = e.deltaY > 0 ? 0.04 : -0.04;
+      const newSpan = Math.max(0.1, Math.min(1, span + delta));
+      const mid = (start + end) / 2;
+      zoomRef.current = { start: Math.max(0, mid - newSpan/2), end: Math.min(1, mid + newSpan/2) };
+      draw();
+    };
+    canvas.addEventListener('wheel', handler, { passive: false });
+    return () => canvas.removeEventListener('wheel', handler);
+  }, [draw]);
+
+  const getCanvasPos = e => {
     const rect = canvasRef.current.getBoundingClientRect();
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
-  const getBarAtX = (x) => {
+  const getBarAt = x => {
     const canvas = canvasRef.current;
     if (!canvas) return null;
-    const PAD_L = 8, PAD_R = 72;
-    const chartW = canvas.width - PAD_L - PAD_R;
     const { start, end } = zoomRef.current;
-    const ohlc = ohlcRef.current;
-    const startIdx = Math.floor(start * ohlc.length);
-    const endIdx   = Math.ceil(end * ohlc.length);
-    const ratio = (x - PAD_L) / chartW;
-    const idx = Math.round(startIdx + ratio * (endIdx - startIdx));
-    return ohlc[Math.max(0, Math.min(ohlc.length - 1, idx))];
+    const si = Math.floor(start * ohlcRef.current.length);
+    const ei = Math.ceil(end * ohlcRef.current.length);
+    const ratio = (x - 8) / (canvas.width - 8 - 74);
+    const idx = Math.round(si + ratio * (ei - si));
+    return ohlcRef.current[Math.max(0, Math.min(ohlcRef.current.length - 1, idx))];
   };
 
-  const handleMouseMove = (e) => {
+  const handleMouseMove = e => {
     const pos = getCanvasPos(e);
-    setCrosshair(pos);
-    draw(pos);
-    const bar = getBarAtX(pos.x);
-    if (bar) setTooltip({ bar, x: pos.x, y: pos.y });
+    crossRef.current = pos;
+    const bar = getBarAt(pos.x);
+    setTooltip(bar ? { bar, x: pos.x, y: pos.y } : null);
+    draw();
   };
 
   const handleMouseLeave = () => {
-    setCrosshair(null);
+    crossRef.current = null;
     setTooltip(null);
-    draw(null);
+    draw();
   };
 
-  const handleWheel = (e) => {
-    e.preventDefault();
-    const { start, end } = zoomRef.current;
-    const span = end - start;
-    const delta = e.deltaY > 0 ? 0.05 : -0.05;
-    const newSpan = Math.max(0.1, Math.min(1, span + delta));
-    const mid = (start + end) / 2;
-    zoomRef.current = {
-      start: Math.max(0, mid - newSpan / 2),
-      end:   Math.min(1, mid + newSpan / 2),
-    };
-    draw(crosshair);
-  };
+  const zoomIn    = () => { const { start, end } = zoomRef.current; const m=(start+end)/2, s=(end-start)*.7; zoomRef.current={start:Math.max(0,m-s/2),end:Math.min(1,m+s/2)}; draw(); };
+  const zoomOut   = () => { const { start, end } = zoomRef.current; const m=(start+end)/2, s=Math.min(1,(end-start)*1.4); zoomRef.current={start:Math.max(0,m-s/2),end:Math.min(1,m+s/2)}; draw(); };
+  const zoomReset = () => { zoomRef.current = { start: 0, end: 1 }; draw(); };
 
-  const zoomIn    = () => { const { start, end } = zoomRef.current; const mid = (start+end)/2, span=(end-start)*0.7; zoomRef.current={start:Math.max(0,mid-span/2),end:Math.min(1,mid+span/2)}; draw(null); };
-  const zoomOut   = () => { const { start, end } = zoomRef.current; const mid = (start+end)/2, span=Math.min(1,(end-start)*1.4); zoomRef.current={start:Math.max(0,mid-span/2),end:Math.min(1,mid+span/2)}; draw(null); };
-  const zoomReset = () => { zoomRef.current = { start: 0, end: 1 }; draw(null); };
-// Attach wheel listener as non-passive so preventDefault works
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const handler = (e) => {
-      e.preventDefault();
-      const { start, end } = zoomRef.current;
-      const span = end - start;
-      const delta = e.deltaY > 0 ? 0.05 : -0.05;
-      const newSpan = Math.max(0.1, Math.min(1, span + delta));
-      const mid = (start + end) / 2;
-      zoomRef.current = {
-        start: Math.max(0, mid - newSpan / 2),
-        end:   Math.min(1, mid + newSpan / 2),
-      };
-      draw(null);
-    };
-    canvas.addEventListener('wheel', handler, { passive: false });
-    return () => canvas.removeEventListener('wheel', handler);
-  }, [draw]);  return (
-    <div className="chart-area" style={{ position: 'relative', cursor: 'crosshair' }}>
+  return (
+    <div className="chart-area" style={{ position: 'relative', cursor: 'crosshair', background: '#080c14' }}>
       <canvas
         ref={canvasRef}
         style={{ width: '100%', height: '100%', display: 'block' }}
@@ -303,52 +288,62 @@ export default function PriceChart({ history, pairKey, tf }) {
         onMouseLeave={handleMouseLeave}
       />
 
-      {/* Zoom buttons */}
-      <div style={{ position: 'absolute', top: 8, right: 80, display: 'flex', gap: 4 }}>
+      {/* Zoom controls */}
+      <div style={{ position: 'absolute', top: 8, right: 82, display: 'flex', gap: 4 }}>
         {[['−', zoomOut], ['+', zoomIn], ['⊡', zoomReset]].map(([label, fn]) => (
           <button key={label} onClick={fn} style={{
-            width: 24, height: 24, background: 'var(--bg3)',
-            border: '1px solid var(--border2)', borderRadius: 4,
-            color: 'var(--t2)', fontFamily: 'var(--mono)', fontSize: 13,
+            width: 26, height: 26,
+            background: 'rgba(8,12,20,0.9)',
+            border: '1px solid rgba(56,189,248,0.15)',
+            borderRadius: 5, color: '#5c7a9a',
+            fontFamily: 'var(--mono)', fontSize: 13,
             cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            transition: 'all .15s',
           }}>{label}</button>
         ))}
       </div>
 
-      {/* Tooltip */}
+      {/* OHLC Tooltip */}
       {tooltip && (
         <div style={{
           position: 'absolute',
-          left: tooltip.x > (canvasRef.current?.width ?? 0) / 2 ? tooltip.x - 170 : tooltip.x + 12,
-          top: Math.max(8, tooltip.y - 80),
-          background: 'var(--bg3)', border: '1px solid var(--border3)',
-          borderRadius: 6, padding: '8px 12px', pointerEvents: 'none',
-          zIndex: 10, minWidth: 155,
+          left: tooltip.x > (canvasRef.current?.width ?? 0) / 2 ? tooltip.x - 172 : tooltip.x + 14,
+          top: Math.max(10, tooltip.y - 100),
+          background: 'rgba(8,12,20,0.95)',
+          border: '1px solid rgba(56,189,248,0.2)',
+          borderRadius: 8, padding: '10px 14px',
+          pointerEvents: 'none', zIndex: 10, minWidth: 155,
+          backdropFilter: 'blur(8px)',
         }}>
-          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:6, borderBottom:'1px solid var(--border)', paddingBottom:4 }}>
-            <span style={{ fontFamily:'var(--mono)', fontSize:10, color:'var(--t3)' }}>OHLC</span>
-            <span style={{ fontFamily:'var(--mono)', fontSize:10, fontWeight:700, color: tooltip.bar.c >= tooltip.bar.o ? 'var(--up)' : 'var(--dn)' }}>
-              {tooltip.bar.c >= tooltip.bar.o ? '▲ Bull' : '▼ Bear'}
+          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:8, paddingBottom:6, borderBottom:'1px solid rgba(255,255,255,0.06)' }}>
+            <span style={{ fontFamily:'var(--mono)', fontSize:9, color:'#5c7a9a', letterSpacing:'.06em' }}>OHLC</span>
+            <span style={{ fontFamily:'var(--mono)', fontSize:10, fontWeight:700, color: tooltip.bar.c >= tooltip.bar.o ? '#00d97e' : '#ff4d4d' }}>
+              {tooltip.bar.c >= tooltip.bar.o ? '▲ Bullish' : '▼ Bearish'}
             </span>
           </div>
-          {[['O', tooltip.bar.o,'var(--t1)'],['H',tooltip.bar.h,'var(--up)'],['L',tooltip.bar.l,'var(--dn)'],['C',tooltip.bar.c,tooltip.bar.c>=tooltip.bar.o?'var(--up)':'var(--dn)']].map(([label,val,color])=>(
-            <div key={label} style={{ display:'flex', justifyContent:'space-between', marginBottom:2 }}>
-              <span style={{ fontFamily:'var(--mono)', fontSize:10, color:'var(--t3)' }}>{label}</span>
-              <span style={{ fontFamily:'var(--mono)', fontSize:10, color, fontWeight:600 }}>{val?.toFixed(dec)}</span>
+          {[['Open', tooltip.bar.o, '#e2eaf5'], ['High', tooltip.bar.h, '#00d97e'], ['Low', tooltip.bar.l, '#ff4d4d'], ['Close', tooltip.bar.c, tooltip.bar.c >= tooltip.bar.o ? '#00d97e' : '#ff4d4d']].map(([label, val, color]) => (
+            <div key={label} style={{ display:'flex', justifyContent:'space-between', gap:20, marginBottom:3 }}>
+              <span style={{ fontFamily:'var(--mono)', fontSize:9, color:'#2d4460' }}>{label}</span>
+              <span style={{ fontFamily:'var(--mono)', fontSize:9, color, fontWeight:600 }}>{val?.toFixed(dec)}</span>
             </div>
           ))}
+          <div style={{ display:'flex', justifyContent:'space-between', gap:20, marginTop:6, paddingTop:6, borderTop:'1px solid rgba(255,255,255,0.05)' }}>
+            <span style={{ fontFamily:'var(--mono)', fontSize:9, color:'#2d4460' }}>Range</span>
+            <span style={{ fontFamily:'var(--mono)', fontSize:9, color:'#f0b429', fontWeight:600 }}>{(tooltip.bar.h - tooltip.bar.l).toFixed(dec)}</span>
+          </div>
         </div>
       )}
 
-      {/* Legend */}
+      {/* Bottom legend */}
       <div style={{
-        position:'absolute', bottom:6, left:10,
-        display:'flex', gap:12, fontSize:9, fontFamily:'var(--mono)', color:'var(--t3)', pointerEvents:'none',
+        position: 'absolute', bottom: 6, left: 10,
+        display: 'flex', gap: 12, fontSize: 9,
+        fontFamily: 'var(--mono)', color: '#2d4460', pointerEvents: 'none',
       }}>
-        <span><span style={{color:'#22c77a'}}>▲</span> Buy</span>
-        <span><span style={{color:'#f5473a'}}>▼</span> Sell</span>
-        <span style={{color:'rgba(34,199,122,0.7)'}}>--- Support</span>
-        <span style={{color:'rgba(245,71,58,0.7)'}}>--- Resistance</span>
+        <span><span style={{ color:'#00d97e' }}>▲</span> Buy</span>
+        <span><span style={{ color:'#ff4d4d' }}>▼</span> Sell</span>
+        <span style={{ color:'rgba(0,217,126,.5)' }}>─ ─ Support</span>
+        <span style={{ color:'rgba(255,77,77,.5)' }}>─ ─ Resistance</span>
         <span>scroll to zoom</span>
       </div>
     </div>
