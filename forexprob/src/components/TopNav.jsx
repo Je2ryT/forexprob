@@ -6,7 +6,7 @@ export default function TopNav({ currentPair, pairData, onSelect, onRefresh, isL
 
   return (
     <div className="topnav">
-      <div className="logo-mark">FXPROB</div>
+      <div className="logo-mark">FXProb</div>
 
       <div className="nav-pair-tabs">
         {Object.entries(PAIRS).map(([key, cfg]) => {
@@ -27,17 +27,18 @@ export default function TopNav({ currentPair, pairData, onSelect, onRefresh, isL
       <div className="nav-right">
         <div style={{
           display: 'flex', alignItems: 'center', gap: 5,
-          padding: '2px 8px', borderRadius: 4,
+          padding: '2px 9px', borderRadius: 3,
           border: `1px solid ${isLive ? 'var(--upbdr)' : 'var(--border2)'}`,
           background: isLive ? 'var(--upbg)' : 'transparent',
         }}>
           <div style={{
-            width: 6, height: 6, borderRadius: '50%',
+            width: 5, height: 5, borderRadius: '50%',
             background: isLive ? 'var(--up)' : 'var(--t3)',
             animation: isLive ? 'pulse 1.5s infinite' : 'none',
           }} />
           <span style={{
-            fontFamily: 'var(--mono)', fontSize: 10,
+            fontFamily: 'var(--mono)', fontSize: 9,
+            letterSpacing: '0.08em',
             color: isLive ? 'var(--up)' : 'var(--t3)',
           }}>
             {isLive ? 'LIVE' : 'SIM'}
